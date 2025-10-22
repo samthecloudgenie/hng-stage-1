@@ -1,0 +1,3 @@
+2025-10-22 13:46:57 Cleanup requested for ubuntu@ec2-18-132-63-255.eu-west-2.compute.amazonaws.com (key=/home/samuel/HNG-1.pem)
+2025-10-22 13:46:57 Starting remote cleanup...
+2025-10-22 13:47:02 Cleanup finished on remote host ec2-18-132-63-255.eu-west-2.compute.amazonaws.com

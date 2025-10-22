@@ -1,0 +1,2 @@
+2025-10-22 13:47:59 Inputs: repo=https://github.com/samthecloudgenie/hng-stage-1.git branch=main remote=ubuntu@ec2-18-132-63-255.eu-west-2.compute.amazonaws.com key=/home/samuel/HNG-1.pem port=5000
+2025-10-22 13:47:59 Updating local repo at /tmp/hng_stage1_src

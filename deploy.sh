@@ -1,87 +1,125 @@
 #!/bin/sh
-# POSIX-style automated deployment script for HNG Stage 1
-# Usage: ./deploy.sh
-# NOTE: Test carefully on a non-production server first.
 
-set -eu  # exit on error, treat unset vars as error
+set -eu
 
-_TIMESTAMP() {
-  date +"%Y%m%d_%H%M%S"
-}
-
-LOGFILE="deploy_$(date +%Y%m%d).log"
-log() {
-  msg="$1"
-  printf "%s %s\n" "$(date '+%Y-%m-%d %H:%M:%S')" "$msg" >> "$LOGFILE"
-  printf "%s\n" "$msg"
-}
+_now() { date +"%Y%m%d_%H%M%S"; }
+LOGFILE="deploy_$(_now).log"
+log() { printf "%s %s\n" "$(date '+%Y-%m-%d %H:%M:%S')" "$1" >> "$LOGFILE"; printf "%s\n" "$1"; }
 
 err_exit() {
   log "ERROR: $1"
-  exit 1
+  printf "ERROR: %s\n" "$1" >&2
+  exit "${2:-1}"
 }
 
-trap 'err_exit "Script interrupted or failed."' INT TERM HUP
+# parse optional flag
+CLEANUP=0
+if [ "${1:-}" = "--cleanup" ]; then
+  CLEANUP=1
+fi
 
-# 1. Collect parameters
-printf "Enter GitHub repo URL (https or ssh): "
+# prompt helper that supports default
+_prompt() {
+  prompt="$1"
+  default="$2"
+  if [ -n "$default" ]; then
+    printf "%s (%s): " "$prompt" "$default"
+  else
+    printf "%s: " "$prompt"
+  fi
+  read ans
+  if [ -z "$ans" ]; then
+    printf "%s\n" "${default:-}"
+  else
+    printf "%s\n" "$ans"
+  fi
+}
+
+# collect minimal info needed for cleanup if asked
+if [ "$CLEANUP" -eq 1 ]; then
+  printf "Running cleanup mode. I need connection info.\n"
+  REPO_URL=""
+  printf "Remote server username (e.g. ubuntu): "
+  read SSH_USER
+  printf "Server IP or DNS: "
+  read SSH_HOST
+  printf "SSH key path (full path): "
+  read SSH_KEY_IN
+  SSH_KEY_PATH=$(eval echo "${SSH_KEY_IN}")
+  log "Cleanup requested for ${SSH_USER}@${SSH_HOST} (key=${SSH_KEY_PATH})"
+  SSH_OPTS="-i $SSH_KEY_PATH -o BatchMode=yes -o StrictHostKeyChecking=no"
+  SSH_TARGET="${SSH_USER}@${SSH_HOST}"
+  log "Starting remote cleanup..."
+  ssh $SSH_OPTS "$SSH_TARGET" <<'REMOTE_CLEAN'
+set -eu
+echo "Stopping + removing container and image..."
+sudo docker rm -f hng_stage1_app || true
+sudo docker rmi -f hng_stage1_image || true
+echo "Removing app dir..."
+sudo rm -rf /opt/hng_stage1_app || true
+echo "Removing nginx configs..."
+sudo rm -f /etc/nginx/sites-enabled/hng_stage1 /etc/nginx/sites-available/hng_stage1 || true
+echo "Testing and reloading nginx..."
+sudo nginx -t || true
+sudo systemctl reload nginx || true
+echo "CLEANUP_DONE"
+REMOTE_CLEAN
+  log "Cleanup finished on remote host $SSH_HOST"
+  printf "Cleanup finished. Check %s for logs.\n" "$LOGFILE"
+  exit 0
+fi
+
+# ---------- Interactive deploy inputs ----------
+printf "GitHub Repository URL (https or ssh): "
 read REPO_URL
 
-printf "If using PAT for HTTPS cloning, enter it now (or press Enter to use normal git/ssh): "
+printf "Personal Access Token (PAT) (press Enter for none): "
 read PAT
-# If PAT provided, it'll be used in clone URL (note: PAT in command history is visible)
 
-printf "Branch name (press Enter for main): "
+printf "Branch name (default: main): "
 read BRANCH
 BRANCH=${BRANCH:-main}
 
-printf "Remote SSH username (e.g. ubuntu): "
+printf "Remote server username (e.g. ubuntu): "
 read SSH_USER
 
-printf "Remote host (IP or DNS): "
+printf "Server IP or DNS (public): "
 read SSH_HOST
 
-printf "Path to SSH key to use for remote access (full path, e.g. ~/hng.pem). If none, press Enter: "
-read SSH_KEY
-SSH_KEY_PATH=${SSH_KEY:-}
+printf "SSH key path (full path, e.g. /home/samuel/HNG-1.pem): "
+read SSH_KEY_IN
+SSH_KEY_PATH=$(eval echo "${SSH_KEY_IN}")
 
 printf "Application internal container port (e.g. 5000): "
 read APP_PORT
+APP_PORT=${APP_PORT:-5000}
 
-# Optional: remote target path
 REMOTE_BASE_DIR="/opt/hng_stage1_app"
+log "Inputs: repo=$REPO_URL branch=$BRANCH remote=${SSH_USER}@${SSH_HOST} key=${SSH_KEY_PATH} port=$APP_PORT"
 
-log "Starting deployment: repo=$REPO_URL branch=$BRANCH remote=${SSH_USER}@${SSH_HOST} app_port=${APP_PORT}"
+# basic local prechecks
+if [ -n "$SSH_KEY_PATH" ] && [ ! -f "$SSH_KEY_PATH" ]; then
+  err_exit "SSH key not found at $SSH_KEY_PATH"
+fi
 
-# 2. Clone or update local repo copy in a temp folder
+# clone/pull locally
 TMPDIR="/tmp/hng_stage1_src"
 if [ -d "$TMPDIR" ]; then
-  log "Updating existing local repo at $TMPDIR"
-  cd "$TMPDIR" || err_exit "Cannot cd to $TMPDIR"
-  # set remote
-  if [ -n "$PAT" ]; then
-    # embed PAT in URL for a one-time pull (warning: shows in process list/history)
-    # If repo is https:
-    case "$REPO_URL" in
-      https://*)
-        AUTH_URL="$(printf "%s" "$REPO_URL" | sed "s#https://#https://$PAT:@#")"
-        git fetch --quiet origin || err_exit "git fetch failed"
-        git checkout "$BRANCH" || git checkout -b "$BRANCH"
-        git pull --quiet "$AUTH_URL" "$BRANCH" || err_exit "git pull failed"
-        ;;
-      *)
-        git pull --quiet origin "$BRANCH" || err_exit "git pull failed"
-        ;;
-    esac
+  log "Updating local repo at $TMPDIR"
+  cd "$TMPDIR" || err_exit "cd $TMPDIR failed"
+  if [ -n "$PAT" ] && printf "%s" "$REPO_URL" | grep -q "^https://"; then
+    AUTH_URL="$(printf "%s" "$REPO_URL" | sed "s#https://#https://$PAT:@#")"
+    git fetch --quiet origin || err_exit "git fetch failed"
+    git checkout "$BRANCH" 2>/dev/null || git checkout -b "$BRANCH"
+    git pull --quiet "$AUTH_URL" "$BRANCH" || err_exit "git pull failed"
   else
     git fetch --quiet origin || err_exit "git fetch failed"
-    # set to branch
     git checkout "$BRANCH" 2>/dev/null || git checkout -b "$BRANCH"
     git pull --quiet origin "$BRANCH" || err_exit "git pull failed"
   fi
 else
-  log "Cloning repository into $TMPDIR"
-  rm -rf "$TMPDIR"
+  log "Cloning $REPO_URL into $TMPDIR"
+  rm -rf "$TMPDIR" || true
   mkdir -p "$TMPDIR"
   if [ -n "$PAT" ] && printf "%s" "$REPO_URL" | grep -q "^https://"; then
     AUTH_URL="$(printf "%s" "$REPO_URL" | sed "s#https://#https://$PAT:@#")"
@@ -91,101 +129,86 @@ else
   fi
 fi
 
-# Basic check for Dockerfile or docker-compose.yml
+# verify dockerfile or compose present
 if [ ! -f "$TMPDIR/Dockerfile" ] && [ ! -f "$TMPDIR/docker-compose.yml" ] && [ ! -f "$TMPDIR/docker-compose.yaml" ]; then
   err_exit "Repository does not contain Dockerfile or docker-compose.yml"
 fi
+log "Local repo ready."
 
-# 3. Prepare SSH options
-SSH_OPTS=""
+# SSH check
+SSH_OPTS="-o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=no"
 if [ -n "$SSH_KEY_PATH" ]; then
-  SSH_OPTS="-i $SSH_KEY_PATH"
+  SSH_OPTS="-i $SSH_KEY_PATH $SSH_OPTS"
 fi
 SSH_TARGET="${SSH_USER}@${SSH_HOST}"
 
-# 4. Remote connectivity check (ssh dry-run)
 log "Checking SSH connectivity to $SSH_TARGET"
-if ! ssh $SSH_OPTS -o BatchMode=yes -o ConnectTimeout=10 "$SSH_TARGET" "echo connected" >/dev/null 2>&1; then
-  err_exit "SSH connection failed. Check key, user, and host."
+if ! ssh $SSH_OPTS "$SSH_TARGET" "echo connected" >/dev/null 2>&1; then
+  err_exit "SSH connectivity failed. Check key, user, host, and that port 22 is open."
 fi
-log "SSH check passed"
+log "SSH OK."
 
-# 5. Prepare remote environment: create base dir
-log "Creating remote directory $REMOTE_BASE_DIR"
-ssh $SSH_OPTS "$SSH_TARGET" "sudo mkdir -p $REMOTE_BASE_DIR && sudo chown $(id -u):$(id -g) $REMOTE_BASE_DIR"
+# create remote base dir
+log "Creating remote base dir $REMOTE_BASE_DIR"
+ssh $SSH_OPTS "$SSH_TARGET" "sudo mkdir -p $REMOTE_BASE_DIR && sudo chown \$(id -u):\$(id -g) $REMOTE_BASE_DIR" || err_exit "Failed to create remote dir"
 
-# 6. Transfer project using rsync (preserves only necessary files)
-log "Syncing project files to remote host"
-# Use rsync if available, fallback to scp
-RSYNC_EXISTS=0
+# transfer files using rsync or tar fallback
+log "Transferring files to remote"
 if command -v rsync >/dev/null 2>&1; then
-  RSYNC_EXISTS=1
-fi
-
-if [ "$RSYNC_EXISTS" -eq 1 ]; then
   rsync -avz --delete --exclude '.git' -e "ssh $SSH_OPTS" "$TMPDIR"/ "$SSH_TARGET:$REMOTE_BASE_DIR/" >> "$LOGFILE" 2>&1 || err_exit "rsync failed"
 else
-  # tar over ssh fallback
-  (cd "$TMPDIR" && tar -cz .) | ssh $SSH_OPTS "$SSH_TARGET" "sudo tar -xz -C $REMOTE_BASE_DIR" || err_exit "tar over ssh failed"
+  (cd "$TMPDIR" && tar -cz .) | ssh $SSH_OPTS "$SSH_TARGET" "sudo tar -xz -C $REMOTE_BASE_DIR" >> "$LOGFILE" 2>&1 || err_exit "tar over ssh failed"
 fi
 log "Files transferred"
 
-# 7. Remote install: Docker, docker-compose (simple install sequence)
-REMOTE_CMDS='
+# Upload and run remote deploy script reliably
+REMOTE_SCRIPT="/tmp/hng_deploy_remote_$(_now).sh"
+cat > /tmp/hng_deploy_remote.sh <<'REMOTE_EOF'
+#!/bin/sh
 set -eu
-# Update and install prerequisites
-if command -v docker >/dev/null 2>&1; then
-  echo "docker-installed"
-else
-  # install docker using convenience script (works in most cases)
+export PATH=$PATH:/usr/sbin
+
+REMOTE_BASE_DIR="@REMOTE_BASE_DIR@"
+APP_PORT="@APP_PORT@"
+SSH_HOST_PLACEHOLDER="@SSH_HOST@"
+
+# install docker if missing
+if ! command -v docker >/dev/null 2>&1; then
   curl -fsSL https://get.docker.com | sh
 fi
 
-if command -v docker-compose >/dev/null 2>&1; then
-  echo "compose-installed"
-else
-  # Install docker-compose-plugin or docker-compose binary
+# install docker-compose if missing (plugin or pip fallback)
+if ! command -v docker-compose >/dev/null 2>&1; then
   if docker compose version >/dev/null 2>&1; then
-    echo "docker-compose-plugin"
+    :
   else
-    # fallback to python pip-based docker-compose if needed
     apt-get update -y
     apt-get install -y python3-pip
     pip3 install docker-compose
   fi
 fi
 
-# Add user to docker group if not root
-if [ "$(id -u)" -ne 0 ]; then
-  sudo usermod -aG docker "$(whoami)" || true
-fi
-
-# Ensure nginx installed
-if command -v nginx >/dev/null 2>&1; then
-  echo "nginx-installed"
-else
+# ensure nginx
+if ! command -v nginx >/dev/null 2>&1; then
   apt-get update -y
   apt-get install -y nginx
 fi
 
-# Ensure base dir exists
-mkdir -p '"$REMOTE_BASE_DIR"'
-'
+# add user to docker group (safe)
+if [ "$(id -u)" -ne 0 ]; then
+  sudo usermod -aG docker "$(whoami)" || true
+fi
 
-log "Running remote install and checks"
-ssh $SSH_OPTS "$SSH_TARGET" "sudo sh -c '$REMOTE_CMDS'" >> "$LOGFILE" 2>&1 || err_exit "Remote preparation failed"
-log "Remote prerequisites installed"
+mkdir -p "$REMOTE_BASE_DIR"
+chown $(id -u):$(id -g) "$REMOTE_BASE_DIR" || true
+cd "$REMOTE_BASE_DIR"
 
-# 8. Build and run containers on remote
-REMOTE_DEPLOY_CMDS='
-set -eu
-cd '"$REMOTE_BASE_DIR"'
-# Stop and remove any old container named hng_stage1_app (if present)
+# remove previous container if exists
 if docker ps -a --format "{{.Names}}" | grep -q "^hng_stage1_app$"; then
   docker rm -f hng_stage1_app || true
 fi
 
-# If docker-compose is present and file exists, use it
+# build and run
 if [ -f docker-compose.yml ] || [ -f docker-compose.yaml ]; then
   if command -v docker-compose >/dev/null 2>&1; then
     docker-compose down || true
@@ -195,80 +218,77 @@ if [ -f docker-compose.yml ] || [ -f docker-compose.yaml ]; then
     docker compose up -d --build
   fi
 else
-  # Build and run single Dockerfile
   docker build -t hng_stage1_image .
-  docker run -d --name hng_stage1_app --restart unless-stopped -p 127.0.0.1:'"$APP_PORT"':'"$APP_PORT"' hng_stage1_image
+  docker run -d --name hng_stage1_app --restart unless-stopped -p 127.0.0.1:$APP_PORT:$APP_PORT hng_stage1_image
 fi
-# allow a few seconds for app startup
-sleep 3
-# health check by curling the local container bind (loopback)
-if command -v curl >/dev/null 2>&1; then
-  curl -sS --connect-timeout 5 http://127.0.0.1:'"$APP_PORT"'/ >/dev/null 2>&1 || true
-fi
-'
 
-log "Building and starting container on remote"
-ssh $SSH_OPTS "$SSH_TARGET" "sudo sh -c '$REMOTE_DEPLOY_CMDS'" >> "$LOGFILE" 2>&1 || err_exit "Remote container build/run failed"
-log "Container started on remote"
+sleep 4
 
-# 9. Configure nginx on remote (reverse proxy)
-NGINX_CONF="/etc/nginx/sites-available/hng_stage1"
-NGINX_LINK="/etc/nginx/sites-enabled/hng_stage1"
-
-log "Configuring Nginx reverse proxy on remote"
-create_nginx='
-set -eu
-cat > '"$NGINX_CONF"' <<EOF
+# create nginx conf (use temp file then move)
+NGINX_TMP="/tmp/hng_stage1_conf"
+cat > "$NGINX_TMP" <<'NGCONF'
 server {
     listen 80;
-    server_name '"$SSH_HOST"';
+    server_name PLACEHOLDER_HOST;
 
     location / {
-        proxy_pass http://127.0.0.1:'"$APP_PORT"';
+        proxy_pass http://127.0.0.1:PLACEHOLDER_PORT;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
     }
 }
-EOF
+NGCONF
 
-ln -sf '"$NGINX_CONF"' '"$NGINX_LINK"'
-nginx -t
-systemctl reload nginx
-'
-ssh $SSH_OPTS "$SSH_TARGET" "sudo sh -c '$create_nginx'" >> "$LOGFILE" 2>&1 || err_exit "Nginx configuration failed"
-log "Nginx configured and reloaded"
+# replace placeholders
+sed -i "s|PLACEHOLDER_HOST|$SSH_HOST_PLACEHOLDER|g" "$NGINX_TMP"
+sed -i "s|PLACEHOLDER_PORT|$APP_PORT|g" "$NGINX_TMP"
 
-# 10. Validation: check Docker, container, nginx, and try curl from remote
-log "Running remote validation checks"
+sudo mv "$NGINX_TMP" /etc/nginx/sites-available/hng_stage1
+sudo ln -sf /etc/nginx/sites-available/hng_stage1 /etc/nginx/sites-enabled/hng_stage1
 
-VALIDATE_CMDS='
-set -eu
-echo "Docker version:"
-docker --version || true
-echo "List containers:"
-docker ps --filter "name=hng_stage1_app" --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
-# Test via curl from remote
-if command -v curl >/dev/null 2>&1; then
-  curl -sS --connect-timeout 5 http://127.0.0.1:'"$APP_PORT"'/ || true
-  curl -sS --connect-timeout 5 http://127.0.0.1/ || true
+# fix server_names_hash_bucket_size
+if ! grep -q 'server_names_hash_bucket_size' /etc/nginx/nginx.conf 2>/dev/null; then
+  sudo sed -i '/http {/a \    server_names_hash_bucket_size 64;' /etc/nginx/nginx.conf || true
 fi
-'
 
-ssh $SSH_OPTS "$SSH_TARGET" "sudo sh -c '$VALIDATE_CMDS'" >> "$LOGFILE" 2>&1 || err_exit "Validation checks failed"
+# test and reload nginx (use full path)
+if [ -x /usr/sbin/nginx ]; then
+  /usr/sbin/nginx -t
+else
+  nginx -t
+fi
+sudo systemctl reload nginx || true
 
-# 11. Final external check (from local machine)
-log "Testing public accessibility (local HTTP check)"
+# validations
+echo "REMOTE_VALIDATION: docker: $(docker --version 2>&1 || true)"
+docker ps --filter "name=hng_stage1_app" --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
+if command -v curl >/dev/null 2>&1; then
+  curl -sS --connect-timeout 5 http://127.0.0.1:$APP_PORT >/dev/null 2>&1 && echo "REMOTE_VALIDATION: app_ok" || echo "REMOTE_VALIDATION: app_not_ok"
+  curl -sS --connect-timeout 5 http://127.0.0.1/ >/dev/null 2>&1 || true
+fi
+
+REMOTE_EOF
+
+# substitute variables into remote script safely
+sed "s|@REMOTE_BASE_DIR@|$REMOTE_BASE_DIR|g; s|@APP_PORT@|$APP_PORT|g; s|@SSH_HOST@|$SSH_HOST|g" /tmp/hng_deploy_remote.sh > /tmp/hng_deploy_remote_filled.sh
+scp $SSH_OPTS /tmp/hng_deploy_remote_filled.sh "$SSH_TARGET:/tmp/hng_deploy_remote_filled.sh" >> "$LOGFILE" 2>&1 || err_exit "Failed to upload remote script"
+ssh $SSH_OPTS "$SSH_TARGET" "chmod +x /tmp/hng_deploy_remote_filled.sh && sudo sh /tmp/hng_deploy_remote_filled.sh" >> "$LOGFILE" 2>&1 || err_exit "Remote deployment failed. See log $LOGFILE"
+
+log "Remote deployment completed. Verifying public endpoint..."
 if command -v curl >/dev/null 2>&1; then
   if curl -sS --connect-timeout 8 "http://$SSH_HOST/" >/dev/null 2>&1; then
-    log "SUCCESS: http://$SSH_HOST/ is reachable"
+    log "SUCCESS: http://$SSH_HOST/ reachable"
+    printf "SUCCESS: http://%s/ is reachable\n" "$SSH_HOST"
   else
-    log "WARNING: http://$SSH_HOST/ is not reachable from local machine. Check firewall/security groups."
+    log "WARNING: http://$SSH_HOST/ NOT reachable from this machine"
+    printf "WARNING: http://%s/ NOT reachable from this machine. Check SG/firewalls and nginx logs.\n" "$SSH_HOST"
   fi
 else
-  log "Skipping external curl test because curl is not available locally."
+  log "Skipping external curl test (curl not installed locally)"
 fi
 
-log "Deployment finished successfully"
+log "Deployment finished. Log: $LOGFILE"
+printf "Done. Check %s for full logs\n" "$LOGFILE"
 exit 0

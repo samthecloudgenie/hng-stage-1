@@ -1,0 +1,17 @@
+2025-10-22 10:07:17 Starting deployment: repo=https://github.com/samthecloudgenie/hng-stage-1.git branch=main remote=ubuntu@ec2-18-132-63-255.eu-west-2.compute.amazonaws.com app_port=5000
+2025-10-22 10:07:17 Cloning repository into /tmp/hng_stage1_src
+2025-10-22 10:07:34 Checking SSH connectivity to ubuntu@ec2-18-132-63-255.eu-west-2.compute.amazonaws.com
+2025-10-22 10:07:48 ERROR: SSH connection failed. Check key, user, and host.
+2025-10-22 10:46:23 Starting deployment: repo=https://github.com/samthecloudgenie/hng-stage-1.git branch=main remote=ubuntu@ec2-18-132-63-255.eu-west-2.compute.amazonaws.com app_port=5000
+2025-10-22 10:46:23 Updating existing local repo at /tmp/hng_stage1_src
+2025-10-22 11:38:06 Starting deployment: repo=https://github.com/samthecloudgenie/hng-stage-1.git branch=main remote=ubuntu@ec2-18-132-63-255.eu-west-2.compute.amazonaws.com app_port=5000
+2025-10-22 11:38:06 Updating existing local repo at /tmp/hng_stage1_src
+2025-10-22 11:47:13 Starting deployment: repo=https://github.com/samthecloudgenie/hng-stage-1.git branch=main remote=ubuntu@ec2-18-132-63-255.eu-west-2.compute.amazonaws.com app_port=5000
+2025-10-22 11:47:13 Updating existing local repo at /tmp/hng_stage1_src
+2025-10-22 11:54:59 Starting deployment: repo=https://github.com/samthecloudgenie/hng-stage-1.git branch=main remote=ubuntu@ec2-18-132-63-255.eu-west-2.compute.amazonaws.com app_port=5000
+2025-10-22 11:54:59 Updating existing local repo at /tmp/hng_stage1_src
+2025-10-22 13:10:31 INPUTS: repo=https://github.com/samthecloudgenie/hng-stage-1.git branch=main remote=ubuntu@ec2-18-132-63-255.eu-west-2.compute.amazonaws.com key=/home/samuel/HNG-1.pem app_port=5000
+2025-10-22 13:10:31 Running cleanup on remote host ubuntu@ec2-18-132-63-255.eu-west-2.compute.amazonaws.com
+2025-10-22 13:10:44 Remote cleanup finished
+2025-10-22 13:11:43 INPUTS: repo=https://github.com/samthecloudgenie/hng-stage-1.git branch=main remote=ubuntu@ec2-18-132-63-255.eu-west-2.compute.amazonaws.com key=/home/samuel/HNG-1.pem app_port=5000
+2025-10-22 13:11:43 Updating existing local repo at /tmp/hng_stage1_src
